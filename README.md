@@ -99,14 +99,11 @@ confusing message boundaries.
 
 ## Performance data
 
-The server appends `logs/transfers.csv` with:
-- UTC timestamp
-- operation (upload/download)
-- relative filename
-- byte count
-- elapsed seconds
-- throughput in MiB/s
-- username
+The server will print out the follwing emtrics
+- File name
+- File size
+- Transfer time
+- Transfer speed
 
 The client also prints transfer time and throughput. For a fair experiment,
 repeat each file-size/concurrency combination several times and report averages.
