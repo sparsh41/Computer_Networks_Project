@@ -29,7 +29,7 @@ def main():
         users_path.write_text("{}", encoding="utf-8")
         print(f"Created empty user database at {users_path}. Add users with tools/create_user.py")
 
-    monitor = PerformanceMonitor(Path("logs"))
+    monitor = PerformanceMonitor()
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((args.host, args.port))

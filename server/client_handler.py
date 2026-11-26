@@ -62,6 +62,8 @@ class ClientHandler:
             self.sock.settimeout(600)
             if not self.authenticate():
                 return
+            active = self.monitor.client_connected()
+            print(f"[CONNECTED] {self.username} from {self.address} | active clients: {active}")
             send_json(self.sock, {"ok": True, "message": "Authentication successful"})
             while True:
                 request = recv_json(self.sock)
@@ -79,6 +81,9 @@ class ClientHandler:
             except Exception:
                 pass
         finally:
+            if self.username:
+                active = self.monitor.client_disconnected()
+                print(f"[DISCONNECTED] {self.username} | active clients: {active}")
             try:
                 (self.sock or self.raw_socket).close()
             except OSError:
@@ -166,18 +171,7 @@ class ClientHandler:
         if target.exists() and not target.is_file():
             raise IsADirectoryError("The destination exists and is not a regular file")
         target.parent.mkdir(parents=True, exist_ok=True)
-
-        # Tell client it can start sending file data
-        send_json(self.sock, {
-            "ok": True,
-            "ready": True,
-            "message": "Ready to receive"
-        })
-
-        temp = target.with_name(
-            f".{target.name}.{uuid.uuid4().hex}.part"
-        )
-        
+        temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
         # Tell the client it is safe to begin streaming the announced byte count.
         send_json(self.sock, {"ok": True, "ready": True})
         start = time.perf_counter()
@@ -195,7 +189,9 @@ class ClientHandler:
                 os.fsync(output.fileno())
             os.replace(temp, target)
             elapsed = max(time.perf_counter() - start, 1e-9)
-            self.monitor.record("upload", relative, size, elapsed, self.username)
+            speed = size / (1024 * 1024) / elapsed
+            print(f"[UPLOAD] user={self.username} file={relative} size={size/(1024*1024):.2f} MB "
+                  f"duration={elapsed:.2f}s speed={speed:.2f} MB/s")
             send_json(self.sock, {"ok": True, "message": "Upload complete",
                                   "bytes": size, "seconds": elapsed,
                                   "mbps": size / (1024*1024) / elapsed})
@@ -219,14 +215,16 @@ class ClientHandler:
                         break
                     self.sock.sendall(block)
             elapsed = max(time.perf_counter() - start, 1e-9)
-            self.monitor.record("download", str(target.relative_to(self.storage)), size,
-                                elapsed, self.username)
+            speed = size / (1024 * 1024) / elapsed
+            relative = str(target.relative_to(self.storage))
+            print(f"[DOWNLOAD] user={self.username} file={relative} size={size/(1024*1024):.2f} MB "
+                  f"duration={elapsed:.2f}s speed={speed:.2f} MB/s")
         finally:
             self.monitor.unmark_active(str(target))
 
     def delete(self, req):
         target = self.target(req["path"])
-        if str(target) in self.monitor.active_files:
+        if self.monitor.is_active(str(target)):
             raise PermissionError("File is currently being processed")
         if not target.is_file():
             raise FileNotFoundError("File does not exist")

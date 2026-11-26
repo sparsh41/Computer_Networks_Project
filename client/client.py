@@ -94,8 +94,12 @@ class FileClient:
         result = recv_json(self.sock)
         print()
         if result.get("ok"):
-            print(f"Upload complete: {human_size(size)} in {result['seconds']:.2f}s "
-                  f"({result['mbps']:.2f} MB/s)")
+            print("\n========== TRANSFER COMPLETE ==========")
+            print(f"File: {path.name}")
+            print(f"Size: {human_size(size)}")
+            print(f"Duration: {result['seconds']:.2f} seconds")
+            print(f"Speed: {result['mbps']:.2f} MB/s")
+            print("=====================================")
         else:
             print("Upload failed:", result.get("error"))
 
@@ -120,8 +124,13 @@ class FileClient:
                     print(f"\rDownloading: {received/size*100 if size else 100:.1f}%", end="")
             temp.replace(destination)
             elapsed = max(time.perf_counter()-start, 1e-9)
-            print(f"\nDownload complete: {human_size(size)} in {elapsed:.2f}s "
-                  f"({size/1024/1024/elapsed:.2f} MB/s)")
+            speed = size / 1024 / 1024 / elapsed
+            print("\n========== TRANSFER COMPLETE ==========")
+            print(f"File: {remote}")
+            print(f"Size: {human_size(size)}")
+            print(f"Duration: {elapsed:.2f} seconds")
+            print(f"Speed: {speed:.2f} MB/s")
+            print("=====================================")
         except Exception:
             temp.unlink(missing_ok=True)
             raise
