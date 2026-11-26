@@ -166,7 +166,18 @@ class ClientHandler:
         if target.exists() and not target.is_file():
             raise IsADirectoryError("The destination exists and is not a regular file")
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
+
+        # Tell client it can start sending file data
+        send_json(self.sock, {
+            "ok": True,
+            "ready": True,
+            "message": "Ready to receive"
+        })
+
+        temp = target.with_name(
+            f".{target.name}.{uuid.uuid4().hex}.part"
+        )
+        
         # Tell the client it is safe to begin streaming the announced byte count.
         send_json(self.sock, {"ok": True, "ready": True})
         start = time.perf_counter()
