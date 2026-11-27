@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import json
-import mimetypes
 import os
 import re
 import socket
@@ -9,11 +8,33 @@ import struct
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_HEADER = 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,180}$")
+
+# Shared by every ClientHandler in this server process.
+# Each entry is keyed by a unique transfer ID.
+transfer_history = {}
+transfer_history_lock = threading.Lock()
+
+# Prevents two simultaneous uploads from selecting the same not-yet-created name.
+_reserved_names = set()
+_name_lock = threading.Lock()
+
+EXTENSION_PREFIXES = {
+    "TS": {
+        ".txt", ".text", ".md", ".rtf", ".pdf", ".doc", ".docx",
+        ".odt", ".csv", ".xls", ".xlsx", ".ppt", ".pptx", ".json",
+        ".xml", ".html", ".htm", ".py", ".c", ".cpp", ".h", ".java",
+    },
+    "IM": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".ico"},
+    "VD": {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v", ".mpeg", ".mpg"},
+    "AU": {".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a", ".wma", ".aiff"},
+}
+
 
 def recv_exact(sock, count):
     chunks = []
@@ -26,15 +47,18 @@ def recv_exact(sock, count):
         remaining -= len(data)
     return b"".join(chunks)
 
+
 def recv_json(sock):
     size = struct.unpack("!I", recv_exact(sock, 4))[0]
     if size <= 0 or size > MAX_HEADER:
         raise ValueError("Invalid protocol header length")
     return json.loads(recv_exact(sock, size).decode("utf-8"))
 
+
 def send_json(sock, payload):
     encoded = json.dumps(payload).encode("utf-8")
     sock.sendall(struct.pack("!I", len(encoded)) + encoded)
+
 
 def safe_name(name):
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
@@ -42,6 +66,57 @@ def safe_name(name):
     if name in (".", "..") or "/" in name or "\\" in name:
         raise ValueError("Path separators are not allowed in names")
     return name
+
+
+def file_prefix(filename):
+    extension = Path(filename).suffix.lower()
+    for prefix, extensions in EXTENSION_PREFIXES.items():
+        if extension in extensions:
+            return prefix
+    return "OT"
+
+
+def reserve_server_filename(storage, directory, original_filename):
+    """Choose a unique prefixed name, checking disk and concurrent reservations."""
+    prefix = file_prefix(original_filename)
+    extension = Path(original_filename).suffix.lower()
+    with _name_lock:
+        number = 1
+        while True:
+            candidate_name = f"{prefix}{number:03d}{extension}"
+            candidate = directory / candidate_name
+            key = str(candidate.resolve())
+            if not candidate.exists() and key not in _reserved_names:
+                _reserved_names.add(key)
+                return candidate, key
+            number += 1
+
+
+def release_server_filename(reservation_key):
+    with _name_lock:
+        _reserved_names.discard(reservation_key)
+
+
+def record_transfer(action, username, original_filename, stored_filename,
+                    relative_path, size, elapsed, speed):
+    transfer_id = uuid.uuid4().hex
+    record = {
+        "transfer_id": transfer_id,
+        "action": action,
+        "user": username,
+        "original_filename": original_filename,
+        "stored_filename": stored_filename,
+        "server_path": relative_path,
+        "size_bytes": size,
+        "size_kb": round(size / 1024, 2),
+        "duration_seconds": round(elapsed, 4),
+        "speed_mb_s": round(speed, 4),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    with transfer_history_lock:
+        transfer_history[transfer_id] = record
+    return record
+
 
 class ClientHandler:
     def __init__(self, raw_socket, address, storage, users_path, monitor, tls_context):
@@ -121,7 +196,8 @@ class ClientHandler:
     def handle(self, command, req):
         try:
             if command == "dir":
-                path = self.target(req.get("path", "."))
+                relative = req.get("path", ".")
+                path = self.storage.resolve() if relative == "." else self.target(relative)
                 if not path.exists() or not path.is_dir():
                     raise FileNotFoundError("Directory does not exist")
                 entries = []
@@ -158,25 +234,26 @@ class ClientHandler:
 
     def upload(self, req):
         relative = req["path"]
-        target = self.target(relative)
-        filename = safe_name(target.name)
-        if target == self.storage:
+        requested_target = self.target(relative)
+        original_filename = safe_name(requested_target.name)
+        if requested_target == self.storage:
             raise ValueError("A filename is required")
         size = int(req["size"])
         if size < 0 or size > 20 * 1024**3:
             raise ValueError("File size is outside permitted range (0–20 GB)")
-        if target.exists() and not req.get("overwrite", False):
-            send_json(self.sock, {"ok": False, "code": "EXISTS", "error": "File already exists"})
-            return
-        if target.exists() and not target.is_file():
-            raise IsADirectoryError("The destination exists and is not a regular file")
-        target.parent.mkdir(parents=True, exist_ok=True)
+
+        requested_target.parent.mkdir(parents=True, exist_ok=True)
+        target, reservation_key = reserve_server_filename(
+            self.storage, requested_target.parent, original_filename
+        )
         temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
-        # Tell the client it is safe to begin streaming the announced byte count.
-        send_json(self.sock, {"ok": True, "ready": True})
         start = time.perf_counter()
         self.monitor.mark_active(str(target))
         try:
+            # Keep the existing client protocol: client waits for this before sending bytes.
+            send_json(self.sock, {"ok": True, "ready": True,
+                                  "filename": target.name,
+                                  "original_filename": original_filename})
             remaining = size
             with open(temp, "wb") as output:
                 while remaining:
@@ -190,24 +267,36 @@ class ClientHandler:
             os.replace(temp, target)
             elapsed = max(time.perf_counter() - start, 1e-9)
             speed = size / (1024 * 1024) / elapsed
-            print(f"[UPLOAD] user={self.username} file={relative} size={size/(1024*1024):.2f} MB "
-                  f"duration={elapsed:.2f}s speed={speed:.2f} MB/s")
+            relative_stored = str(target.relative_to(self.storage))
+            record = record_transfer("UPLOAD", self.username, original_filename,
+                                     target.name, relative_stored, size, elapsed, speed)
+            print("\n========== TRANSFER COMPLETE ==========")
+            print(f"Action: UPLOAD | User: {self.username}")
+            print(f"File: {original_filename} -> {target.name}")
+            print(f"Size: {size / 1024:.2f} KB")
+            print(f"Duration: {elapsed:.2f} seconds")
+            print(f"Speed: {speed:.2f} MB/s")
+            print("=======================================")
             send_json(self.sock, {"ok": True, "message": "Upload complete",
-                                  "bytes": size, "seconds": elapsed,
-                                  "mbps": size / (1024*1024) / elapsed})
+                                  "bytes": size, "seconds": elapsed, "mbps": speed,
+                                  "filename": target.name,
+                                  "original_filename": original_filename,
+                                  "transfer_id": record["transfer_id"]})
         finally:
             temp.unlink(missing_ok=True)
             self.monitor.unmark_active(str(target))
+            release_server_filename(reservation_key)
 
     def download(self, req):
         target = self.target(req["path"])
         if not target.is_file():
             raise FileNotFoundError("File does not exist")
         size = target.stat().st_size
+        stored_filename = target.name
         start = time.perf_counter()
         self.monitor.mark_active(str(target))
         try:
-            send_json(self.sock, {"ok": True, "size": size, "filename": target.name})
+            send_json(self.sock, {"ok": True, "size": size, "filename": stored_filename})
             with open(target, "rb") as source:
                 while True:
                     block = source.read(CHUNK_SIZE)
@@ -217,8 +306,15 @@ class ClientHandler:
             elapsed = max(time.perf_counter() - start, 1e-9)
             speed = size / (1024 * 1024) / elapsed
             relative = str(target.relative_to(self.storage))
-            print(f"[DOWNLOAD] user={self.username} file={relative} size={size/(1024*1024):.2f} MB "
-                  f"duration={elapsed:.2f}s speed={speed:.2f} MB/s")
+            record = record_transfer("DOWNLOAD", self.username, stored_filename,
+                                     stored_filename, relative, size, elapsed, speed)
+            print("\n========== TRANSFER COMPLETE ==========")
+            print(f"Action: DOWNLOAD | User: {self.username}")
+            print(f"File: {stored_filename}")
+            print(f"Size: {size / 1024:.2f} KB")
+            print(f"Duration: {elapsed:.2f} seconds")
+            print(f"Speed: {speed:.2f} MB/s")
+            print("=======================================")
         finally:
             self.monitor.unmark_active(str(target))
 

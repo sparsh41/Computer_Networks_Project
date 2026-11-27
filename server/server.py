@@ -1,6 +1,4 @@
 import argparse
-import json
-import os
 import socket
 import ssl
 import threading
@@ -8,6 +6,7 @@ from pathlib import Path
 
 from client_handler import ClientHandler
 from performance_monitor import PerformanceMonitor
+
 
 def main():
     parser = argparse.ArgumentParser(description="Distributed file-sharing server")
@@ -22,14 +21,19 @@ def main():
     args = parser.parse_args()
 
     storage = Path(args.storage).resolve()
-    for folder in ("text", "audio", "video", "other"):
+    for folder in ("text", "image", "audio", "video", "other"):
         (storage / folder).mkdir(parents=True, exist_ok=True)
+
     users_path = Path(args.users).resolve()
     if not users_path.exists():
         users_path.write_text("{}", encoding="utf-8")
         print(f"Created empty user database at {users_path}. Add users with tools/create_user.py")
 
     monitor = PerformanceMonitor()
+    # Shared in-memory dictionary for completed uploads and downloads.
+    transfer_history = {}
+    transfer_lock = threading.Lock()
+
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((args.host, args.port))
@@ -47,17 +51,17 @@ def main():
     try:
         while True:
             raw_socket, address = server_socket.accept()
-            thread = threading.Thread(
-                target=ClientHandler(raw_socket, address, storage, users_path, monitor,
-                                     tls_context).run,
-                daemon=True
-            )
+            handler = ClientHandler(raw_socket, address, storage, users_path, monitor,
+                                    tls_context, transfer_history, transfer_lock)
+            thread = threading.Thread(target=handler.run, daemon=True)
             thread.start()
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        print("\\nShutting down.")
+        print(f"Recorded transfers: {len(transfer_history)}")
     finally:
         server_socket.close()
         monitor.close()
+
 
 if __name__ == "__main__":
     main()

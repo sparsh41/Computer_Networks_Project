@@ -1,7 +1,7 @@
 import threading
 
 class PerformanceMonitor:
-    """Tracks active connections and files being transferred; no CSV logging."""
+    """Tracks active connections and files being transferred"""
     def __init__(self, log_dir=None):
         self.active_files = set()
         self._active_lock = threading.Lock()
