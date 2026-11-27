@@ -41,9 +41,7 @@ From the repository root:
 
    ```bash
    cd server
-   python server.py --host 127.0.0.1 --port 5000 \
-     --storage storage --users users.json \
-     --cert certs/server.crt --key certs/server.key
+   python server.py --host 127.0.0.1 --port 5000
    ```
 
 4. In another terminal, from the repository root:
@@ -99,41 +97,15 @@ confusing message boundaries.
 
 ## Performance data
 
-The server will print out the follwing emtrics
+The server will print out the follwing metrics
 - File name
 - File size
 - Transfer time
 - Transfer speed
 
+The metrics will be saved in a dictionary as well for offline analysis
+
 The client also prints transfer time and throughput. For a fair experiment,
 repeat each file-size/concurrency combination several times and report averages.
 Test concurrency levels such as 1, 2, 5, and 10 clients. Record VM machine type,
 region, network conditions, and file sizes in the report.
-
-## Google Cloud Compute Engine deployment checklist
-
-1. Create a Linux VM and install a supported Python 3 version.
-2. Clone the private GitHub repository.
-3. Generate/install a certificate with the VM's DNS name or IP in its SAN.
-4. Create users on the VM; do not commit `users.json` or private keys.
-5. Start the server under a service manager (systemd recommended).
-6. Configure the VM firewall to allow the TCP port only from intended client IPs
-   where practical. Do not expose SSH or other ports unnecessarily.
-7. Test from a remote client using certificate verification.
-8. Monitor disk capacity: the required 2 GB video test needs extra room for
-   temporary uploads and existing stored files.
-
-Example firewall rule (replace the source range and port appropriately):
-allow TCP 5000 only from your campus/home public IP, not `0.0.0.0/0`.
-
-## Known limitations / next improvements
-
-- The current user database provides authentication but not per-user file ACLs.
-  Add authorization rules if users should have different permissions.
-- `rmdir` only deletes empty directories, intentionally preventing accidental
-  recursive deletion.
-- For a production system, add upload quotas, disk-space checks, rate limits,
-  audit logs for all operations, resumable transfers, checksums (SHA-256), and
-  structured protocol versioning.
-- This is a teaching project, not a hardened public file-hosting service.
-- For production TLS, use a certificate from a trusted CA or your institution.

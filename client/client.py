@@ -51,14 +51,24 @@ class FileClient:
 
     def login(self):
         recv_json(self.sock)
+
         username = input("Username: ").strip()
         password = getpass.getpass("Password: ")
-        send_json(self.sock, {"username": username, "password": password})
+
+        send_json(self.sock, {
+            "username": username,
+            "password": password
+        })
+
         response = recv_json(self.sock)
+
         if not response.get("ok"):
-            raise PermissionError(response.get("error", "Login failed"))
-        response = recv_json(self.sock)
-        print(response.get("message", "Connected"))
+            raise PermissionError(
+                response.get("error", "Login failed")
+            )
+
+        print(response.get("message", "Authentication successful"))
+
 
     def request(self, payload):
         send_json(self.sock, payload)
